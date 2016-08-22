@@ -1,0 +1,2 @@
+ID	Function	Algorithm	ParamemterFile	Run	MaxRun	NumOfProcesses	MaxFEs	PopSize	NumDim	F-parameter	CR-paramter	State	UsedTime	AbsError	X	Fx
+1	TestF	ParallelThreadDE(PEC.json,AutoTaskScheduler)	PEC.json	0	30	4	15000	50	7	0.5	0.9	start	-1	-1	-1
