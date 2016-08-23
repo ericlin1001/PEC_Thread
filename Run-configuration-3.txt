@@ -1,3 +1,0 @@
-ID	Function	Algorithm	ParamemterFile	Run	MaxRun	NumOfProcesses	MaxFEs	PopSize	NumDim	F-parameter	CR-paramter	State	UsedTime	AbsError	X	Fx
-3	TestF	ParallelThreadDE(TestF.json,AutoTaskScheduler2)	TestF.json	0	5	4	30	10	7	0.5	0.9	start	-1	-1	-1ID	Function	Algorithm	ParamemterFile	Run	MaxRun	NumOfProcesses	MaxFEs	PopSize	NumDim	F-parameter	CR-paramter	State	UsedTime	AbsError	X	Fx
-3	TestF	ParallelThreadDE(TestF.json,AutoTaskScheduler2)	TestF.json	0	5	4	30	10	7	0.5	0.9	end	0.058	0	100,-100,-12.4435,81.7695,66.8096,95.3963,14.3052	100

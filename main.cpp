@@ -128,15 +128,14 @@ int main(int argc,char *argv[]){
 	SignalHandleHelper::registerSignalHandler(IntHandler);
 	MPIHelper mpi(argc,argv);
 	int configID;//Should be run once, in master node.
-	SearchParam param("TestF.json");
+	//	SearchParam param("TestF.json");
     Function*f=new TestF();
 #ifdef ORIGINAL
 	de=new ParallelDE();
 #else
 	de=new ParallelThreadDE();
 #ifdef THREAD
-            //TaskScheduler*ts=new AutoTaskScheduler();
-            TaskScheduler*ts=new AutoTaskScheduler2();
+            TaskScheduler*ts=new AutoTaskScheduler();
 #else
             TaskScheduler*ts=new BasicTaskScheduler();
 #endif
@@ -147,7 +146,7 @@ int main(int argc,char *argv[]){
 	/*
 	 */
 	//Function*f=new PECFunction();
-	//SearchParam param("PEC.json");
+	SearchParam param("PEC.json");
 	/*
 	 */
 	//

@@ -64,10 +64,7 @@ void cf_cal(double *, double *, int, double *,double *,double *,double *,int);
 double *OShift,*M,*y,*z,*x_bound;
 int ini_flag,n_flag,func_flag,*SS;
 
-template<class T>
-inline void IGR(T t){}//ignore result, used in fscanf.
 
-#define fscanf(...) IGR(fscanf(__VA_ARGS__));
 void cec14_test_func(double *x, double *f, int nx, int mx,int func_num)
 {
 	int cf_num=10,i,j;
@@ -1319,7 +1316,5 @@ void cf_cal(double *x, double *f, int nx, double *Os,double * delta,double * bia
     }
 	free(w);
 }
-#undef fscanf
 #endif
-
 

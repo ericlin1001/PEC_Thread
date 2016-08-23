@@ -1,0 +1,43 @@
+numSlave=3
+addKeyValue(pid:1,tid:before start :(pid:1,tid:0)
+		0)
+	addKeyValue(pid:2,tid:1)
+	addKeyValue(pid:3,tid:2)
+	addKeyValue(pid:1,tid:3)
+	addKeyValue(pid:2,tid:4)
+	addKeyValue(pid:before start :(pid:2,tid:1)
+			before start :(pid:3,tid:2)
+			3,tid:5)
+##end init.
+	before start :(pid:2,tid:4)
+	before start :(pid:3,tid:5)
+	before start :(pid:1,tid:3)
+	start (pid:2,tid:4)
+	end (pid:2,tid:4)
+	getValue(pid:2,tid:4)
+	addKeyValue(pid:before start :(pid:2,tid:6)
+			2,tid:6)
+	start (pid:1,tid:3)
+	end (pid:1,tid:3)
+	getValue(pid:1,tid:3)
+	addKeyValue(pid:1,tid:7)
+	before start :(pid:1,tid:7)
+	start (pid:2,tid:1)
+	end (pid:2,tid:1)
+	getValue(pid:2,tid:1)
+	addKeyValue(pid:before start :(pid:2,tid:8)
+			2,tid:8)start (pid:2,tid:6)
+
+	end (pid:2,tid:6)
+	getValue(pid:2,tid:6)
+	addKeyValue(pid:before start :(pid:2,tid:9)
+			2,tid:9)
+###end middle.
+	start (pid:2,tid:6)
+	end (pid:2,tid:6)
+	getValue(pid:2,tid:6)
+	value=6
+	v[0]=start (pid:3,tid:5)
+	8
+	v[1]=9
+

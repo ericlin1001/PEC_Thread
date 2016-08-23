@@ -1,9 +1,4 @@
-all:test5
-test5:main.cpp
-	cat /dev/null >log.txt
-	mpic++ -DUSE_MPI -DTHREAD main.cpp
-	mpirun -n 4 ./a.out 2>&1 |tee log.txt
-
+all:test4
 test4:main.cpp
 	cat /dev/null >a
 	cat /dev/null >b

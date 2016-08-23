@@ -1,0 +1,918 @@
+//Warning:: EvaluationFunction(e.g. F1~F30) must fit in concurrency-safety, i.e. DO NOT use global variables.
+//Warning::if task.isFinished in master return =-1;
+//Notice:: vector will reallocate space, when the capacity is not enough.
+#include "include/template.h"
+#include "include/BasicDE.h"
+#include "include/SignalHandleHelper.h"
+#include "include/IDHelper.h"
+#include "pecFunction.h"
+#include<algorithm>
+#include<map>
+#include<iostream>
+#include<fstream>
+#undef DEBUG
+#define NOT_USED {cerr<<"Error::UNUSED."<<endl;int a;cin>>a;}
+#define DEBUG
+#define DEBUG1
+using namespace std;
+DefFunction(TestF,-100,100,100)
+	return xs[0];
+	EndDef
+	class Task{
+		public:
+			static int idcounter;
+			int id;
+			//vector<int>processIDs;
+			bool isFinished;
+			bool isCanceled;
+			int refreshID;
+			vector<double>x;
+			Function*f;
+			MPIHelper*mpi;
+		public:
+			int debugid;
+			pthread_t thread;
+			double fx;
+			Task(){
+				isFinished=false;
+				f=0;
+				mpi=0;
+				isCanceled=false;
+			}
+			void init(vector<double>&x){
+				isFinished=false;
+				f=0;
+				mpi=0;
+				isCanceled=false;
+				id=Task::idcounter++;
+				this->x=x;
+			}
+			double getFx(){
+				return fx;
+			}
+			void doTask(){
+				assert(f!=0);
+				assert(x.size()!=0);
+				fx=f->evaluate(&x[0]);
+			}
+
+	};
+int Task::idcounter=0;
+
+void * clientThread(void *arg){
+	//	Task tmp=*(Task*)arg;//save the arg into temporal var.
+	//	Task *t=&tmp;
+	Task *t=(Task*)arg;
+	//printf("ClientThread(%d)> start(pid:%d,tid:%d)rid:%d\n",t->debugid,t->mpi->getID(),t->id,t->refreshID);
+	//printf("ClientThread> start(pid:%d,tid:%d)\n",t->mpi->getID(),t->id);
+	t->doTask();
+	//send with TaskId,ProcessID,fx.
+	//Warning::int->double->int may cause error.
+	if(t->isCanceled){
+		t->isFinished=true;
+		return 0;
+	}
+	//	pthread_testcancel();
+	double mess[5]={t->id,t->mpi->getID(),t->fx,t->refreshID,t->debugid};
+	t->mpi->send(mess,5,0);
+	//printf("end pid:%1.0f,tid:%1.0f\n",mess[1],mess[0]);
+	t->isFinished=true;
+	//((Task*)arg)->isFinished=true;
+	//	pthread_testcancel();
+	assert(!t->isCanceled);
+	//BUG::some clientThreads are still sending, while the main program exits, which will cause segment faults. (139).
+	return 0;
+}
+;
+
+
+#define MESS_QUIT 0
+#define MESS_ASSIGN 1
+#define MESS_CANCEL 2
+#define MESS_REFRESH 3
+class TaskScheduler{
+	MPIHelper *mpi;
+	vector<Task> tasks;
+	int numSlave;
+	int numDim;
+	Function*f;
+	int refreshID;
+	struct TwoValue{
+		double usedTime;
+		double priority;
+		//
+		int v[2]; double vv[2];
+		TwoValue(){
+			v[0]=-1;
+			v[1]=-1;
+			usedTime=-1;
+		}
+		private:
+		int getIndex(int value){
+
+			if(v[0]==value)return 0;
+			else if(v[1]==value)return 1;
+			Trace(value);
+			Trace(v[0]);
+			Trace(v[1]);
+			assert(false);
+		}
+
+		public:
+		bool hasKey(int k){
+			if(v[0]==k||v[1]==k)return true;
+			return false;
+		}
+		void delKey(int k){
+			assert(v[0]==k||v[1]==k);
+			v[getIndex(k)]=-1;
+		}
+		void calPriority(){
+			//it doesn't matter if usedTime==-1.
+			priority=fabs(usedTime-(Tic::getTimeSec()-getValue(getKey(0))));
+		}
+		bool operator<(const TwoValue&p)const{
+			return priority<p.priority;
+		}
+		void addKeyValue(int k,double value){
+			assert(v[0]==-1||v[1]==-1);
+			int i=getIndex(-1);
+			v[i]=k;
+			vv[i]=value;
+		}
+		double getValue(int k){
+			return vv[getIndex(k)];
+		}
+		//
+		int getKey(int index){
+			//can be accessed by indexing... just like a array.
+			if(v[0]!=-1&&index!=1)return v[0];
+			assert(v[1]!=-1&&(v[0]==-1||index==1));
+			return v[1];
+		}
+		int getNumValue(){
+			int a=(v[0]!=-1);
+			int b=(v[1]!=-1);
+			return a+b;
+		}
+	};
+	vector<TwoValue>slavesTasks;//0 is not used.
+	//master data:
+	private:
+	int getNumTasks(){
+		return tasks.size();
+	}
+	bool isEmpty(){
+		return tasks.empty();
+	}
+	public:
+	void init(MPIHelper*mpi,Function*f,int numDim){
+		this->mpi=mpi;
+		this->f=f;
+		this->numDim=numDim;
+		DEBUGID=0;
+		refreshID=0;
+
+		numSlave=mpi->getNumProcesses()-1;
+		slavesTasks.resize(numSlave+1);
+		ASSERT(numSlave>=1);
+	}
+	//in master:
+	int DEBUGID;
+
+	Task* getTask(int tid){
+		for(int i=0;i<tasks.size();i++){
+			if(tasks[i].id==tid)return &tasks[i];
+		}
+		return 0;
+	}
+	//void assignTaskToProcess(int taskIndex,int pid){
+	void assignTaskToProcess(int tid,int pid){
+		//tasks[tid].debugid=DEBUGID++;
+		//stupid.enter(DEBUGID-1);
+		mpi->send(MESS_ASSIGN,pid);
+		//assert(tid==tasks[tid].id);
+		mpi->send(tid,pid);
+		/*
+		   if(taskIndex>13){
+		   cout<<"*************T1{***********"<<endl;
+		   Trace(taskIndex);
+		   Trace(tasks.size());
+		   Trace(tasks[taskIndex].x.size());
+		   cout<<"**************}***********"<<endl;
+		   }
+		 */
+		Task *t=getTask(tid);
+		assert(t!=0);
+		mpi->send(&t->x[0],numDim,pid);
+		//mpi->send(tasks[tid].debugid,pid);
+		//
+		//assert(tasks[tid].id==tid);
+#ifdef DEBUG1
+		printf("master> assignTask(pid:%d,tid:%d)\n",pid,tid);
+#endif
+		slavesTasks[pid].addKeyValue(tid,Tic::getTimeSec());
+	}
+	int acceptTask(){//return pid.
+		double res[5];
+		mpi->recv(res,5,MPI_ANY_SOURCE);
+		//mpi->recv(res,4,MPI_ANY_SOURCE);
+		//if((int)res[3]!=refreshID)return -1;
+		int tid=(int)res[0];
+		int pid=(int)res[1];
+		double fx=res[2]; 
+		//int did=(int)res[4];
+		//printf("master(%d)> end(pid:%d,tid:%d)\n",(int)res[4],pid,tid);
+		Task *t=getTask(tid);
+#ifdef DEBUG1
+		printf("master > end(pid:%d,tid:%d)\n",pid,tid);
+#endif
+		if(t==0){
+			return -1;
+		}
+		if(!t->isFinished){
+			t->fx=fx;
+			t->isFinished=true;
+		}else{
+			return -1;
+		}
+		if(slavesTasks[pid].hasKey(tid)){
+			//
+			if(fabs(slavesTasks[pid].usedTime+1)==0){
+				//it's the first time.
+				slavesTasks[pid].usedTime=0;
+			}
+			//cout<<"getValue(pid:"<<pid<<",tid:"<<tid<<")"<<endl;
+			slavesTasks[pid].usedTime+=(Tic::getTimeSec()-slavesTasks[pid].getValue(tid));
+			slavesTasks[pid].usedTime/=2.0;
+			slavesTasks[pid].delKey(tid);
+		}
+		//
+		for(int i=1;i<=numSlave;i++){
+			if(slavesTasks[i].hasKey(tid)){
+				masterCancelTask(i,tid);
+			}
+		}
+		return pid;
+	}
+	bool isAllTaskFinished(){
+		for(int i=0;i<tasks.size();i++){
+			if(!tasks[i].isFinished)return false;
+		}
+		return true;
+	}
+	int getNumUnfinishedTasks(){
+		int r=0;
+		for(int i=0;i<tasks.size();i++){
+			if(!tasks[i].isFinished)r++;
+		}
+		return r;
+	}
+	vector<int>getSortedTask(const vector<int>&pids){
+		vector<TwoValue>ps;
+		for(int i=0;i<pids.size();i++){
+			ps.push_back(slavesTasks[pids[i]]);
+			ps.back().calPriority();
+		}
+		sort(ps.begin(),ps.end());
+		vector<int>tids;
+		for(int i=0;i<ps.size();i++){
+			tids.push_back(ps[i].getKey(0));
+		}
+		reverse(tids.begin(),tids.end());
+		return tids;
+	}
+	void masterCancelTask(int pid,int tid){
+		mpi->send(MESS_CANCEL,pid);
+		mpi->send(tid,pid);
+		slavesTasks[pid].delKey(tid);
+	}
+	void refreshSlave(){
+		for(int i=1;i<=numSlave;i++){
+			//	mpi->send(MESS_REFRESH,i);
+			while(slavesTasks[i].getNumValue()>0){
+				masterCancelTask(i,slavesTasks[i].getKey(0));
+			}
+		}
+		//this->refreshID++;
+	}
+
+	bool adjusts(){
+		vector<int>zeroPids,onePids,twoPids;//slave's pid list.
+		zeroPids.clear();
+		onePids.clear();
+		twoPids.clear();
+		for(int i=1;i<=numSlave;i++){
+			int tmp=slavesTasks[i].getNumValue();
+			if(tmp==0){
+				zeroPids.push_back(i);
+			}else if(tmp==1){
+				onePids.push_back(i);
+			}else{
+				twoPids.push_back(i);
+			}
+		}
+		if(!zeroPids.empty()){//has zeroPids's
+			if(!twoPids.empty()){//has twoPids's
+				int min_s=min(zeroPids.size(),twoPids.size());
+				for(int i=0;i<min_s;i++){
+					int tid=slavesTasks[twoPids[i]].getKey(1);
+					int pid=zeroPids[i];
+					masterCancelTask(twoPids[i],tid);
+					//if(slavesTasks[pid].getNumValue()==0||slavesTasks[pid].getKey(0)!=tid){
+					assignTaskToProcess(tid,pid);
+					//}
+				}
+			}else{//has onePids's
+				//rebalances some xs.
+				vector<int> tids=getSortedTask(onePids);
+				int min_s=min(zeroPids.size(),tids.size());
+				for(int i=0;i<min_s;i++){
+					int tid=tids[i];
+					int pid=zeroPids[i];
+					//if(slavesTasks[pid].getNumValue()==0||slavesTasks[pid].getKey(0)!=tid){
+					assignTaskToProcess(tid,pid);
+					//}
+				}
+			}
+		}else{
+			//all processes are filled with 1 to 2 tasks.
+			return false;
+		}
+		return true;
+	}
+
+	//only in master:
+	void addTask(vector<Task> &t){
+		tasks=t;
+	}
+	void printMap(map<int,Task>&m){
+	}
+
+	void start(){
+		//return only if all task is finished.
+		if(mpi->isMaster()){
+			int numTasks=getNumTasks();
+			assert(numTasks==tasks.size());
+#ifdef DEBUG1
+			Trace(numTasks);
+			Trace(numSlave);
+#endif
+			int nextTask=0;
+			for(int j=0;j<2;j++){
+				for(int i=1;i<=numSlave;i++){
+					if(nextTask>=numTasks)break;
+					assert(nextTask<numTasks);
+					assignTaskToProcess(tasks[nextTask].id,i);
+					nextTask++;
+				}
+			}
+#ifdef DEBUG1
+			cout<<"##end init."<<endl;
+#endif
+			while(nextTask<numTasks){
+				int pid=acceptTask();
+				if(pid!=-1){
+					//assign a new task for it.
+					assert(nextTask<numTasks);
+					assignTaskToProcess(tasks[nextTask].id,pid);
+					nextTask++;
+				}
+			}
+#ifdef DEBUG1
+			cout<<"###end middle."<<endl;
+#endif
+			while(!isAllTaskFinished()){
+				//has sth not finished.
+				if(adjusts()){
+				}else{
+					acceptTask();
+					//Trace(getNumUnfinishedTasks());
+				}
+			}
+			refreshSlave();
+			//clear all things.
+		}else{
+			bool isEnd=false;
+			int type;
+			bool isDebug=false;
+			int refreshID=0;
+			int tid;
+			assert(numDim>0);
+			if(isDebug)
+				cout<<"client("<<mpi->getName()<<") start."<<endl;
+			while(!isEnd){
+				mpi->recv(type,0);
+				Task *t=NULL;
+				//cout<<mpi->getName()<<">recv:";
+				switch(type){
+					case MESS_QUIT:
+						if(isDebug)
+							cout<<"MESS_QUIT";
+						isEnd=true;
+						break;
+					case MESS_ASSIGN:
+						if(isDebug)
+							cout<<"MESS_ASSIGN";
+						//taskID,x,
+						mpi->recv(tid,0);
+
+						assert(ctasks.find(tid)==ctasks.end() || ctasks.find(tid)->second.isCanceled);
+						if(ctasks.find(tid)!=ctasks.end()){
+							t=&ctasks.find(tid)->second;
+							if(t->isCanceled){
+								//Warning: data race.
+								t->isCanceled=false;
+								t->isFinished=false;
+								mpi->recv(&(t->x[0]),numDim,0);//useless.
+								startTask(t);
+
+							}else{
+								printf("Error(pid:%d,tid:%d)\n",mpi->getID(),tid);
+								printMap(ctasks);
+							}
+						}else{
+							ctasks[tid]=Task();
+							t=&(ctasks[tid]);
+							t->id=tid;
+							t->x.resize(numDim);
+							mpi->recv(&(t->x[0]),numDim,0);
+							t->f=f;
+							t->mpi=mpi;
+							startTask(t);
+						}
+						break;
+					case MESS_CANCEL:
+						if(isDebug)
+							cout<<"MESS_CANCEL";
+						//taskid.
+						int taskID;
+						mpi->recv(taskID,0);
+						cancelTask(taskID);
+						break;
+					default:
+						cerr<<"Error:Unknow type"<<endl;
+						break;
+				}
+				if(isDebug)
+					cout<<endl;
+			}
+			printf("client(%s) exit.\n",mpi->getName());
+		}
+	}
+	map<int,Task> ctasks;
+	void startTask(Task*t){
+		//clienThread.
+		//printf("Create thread(%d) :(pid:%d,tid:%d)\n",t.debugid,t.mpi->getID(),t.id);
+		//printf("Create thread :(pid:%d,tid:%d)\n",t->mpi->getID(),t->id);
+		int res=pthread_create(&(t->thread),NULL,clientThread,(void*)t);//pthread_exit(t1);
+		ASSERT(!res);
+	}
+	//BUG::There maybe a case that some last generation tasks are finished in this generation, and mix with the current tid.
+	void cancelTask(int taskid){
+		//BUG:: cancelTask can't erase task, or the pointer will be invalid.
+		ctasks[taskid].isCanceled=true;
+		map<int,Task>::iterator i;
+		for(i=ctasks.begin();i!=ctasks.end();++i){
+			if(i->second.isFinished){
+				ctasks.erase(i);
+			}
+		}
+		/*
+		   for(int i=0;i<tasks.size();i++){
+		   if(tasks[i].id==taskid){
+		//tasks[i].isCanceled=true;
+		//pthread_cancel(tasks[i].thread);
+		//pthread_join(tasks[i].thread,NULL);
+		tasks.erase(tasks.begin()+i);
+		//	break;
+		}
+		//deleting useless record..
+		if(tasks[i].isFinished){
+		tasks.erase(tasks.begin()+i);
+		i--;
+		}
+		}
+		 */
+	}
+	void end(){
+		if(mpi->isMaster()){
+			for(int i=1;i<mpi->getNumProcesses();i++){
+				mpi->send(MESS_QUIT,i);
+			}
+		}else{
+		}
+	}
+};
+
+class ParallelDE:public EA
+{
+	private:
+		//about function:f
+		Function *f;
+		vector<vector<double> >range;
+		int numDim;
+		//algorithm related parameters.
+		int PopSize;
+		double F,CR;
+		//
+		vector<vector<double> >x;//x,trail x.
+		vector<vector<double> >tmpX;
+		vector<double>fx;
+		vector<double>tmpFx;
+		vector<double>tx;
+		//
+		int bestI;
+		MPIHelper*mpi;
+		SearchParam *param;
+		Save *save;
+		TaskScheduler scheduler;
+	private:
+		void updateX(){
+			//main process
+			vector<vector<double> >txs;
+			vector<double> ftxs;
+			txs.resize(PopSize);
+
+			RandomPermutation perm(PopSize);
+			for(int i=0;i<PopSize;i++){
+				perm.generate();
+				int a=perm.next(); int b=perm.next(); int c=perm.next();
+				if(a==i){a=perm.next();}
+				if(b==i){b=perm.next();}
+				if(c==i){c=perm.next();}
+				int randDim=rand()%numDim;
+				for(int j=0;j<numDim;j++){
+					if(j==randDim||drand()<=CR){
+						tx[j]=x[a][j]+F*(x[b][j]-x[c][j]);
+						if(tx[j]<range[j][0] || tx[j]>range[j][1]){
+							tx[j]=drand(range[j][0],range[j][1]);
+						}
+					}else{
+						tx[j]=x[i][j];
+					}
+				}
+				txs[i]=tx;
+			}
+			evaluatePopulation(txs,ftxs);
+			for(int i=0;i<PopSize;i++){
+				vector<double>&tx=txs[i];
+				double &ftx=ftxs[i];
+				if(ftx<fx[i]){
+					x[i]=tx;
+					fx[i]=ftx;
+					if(ftx<fx[bestI]){
+						bestI=i;
+					}
+				}
+			}
+		}
+		void schema1_updateX(){
+			//main process
+			vector<vector<double> >txs;
+			vector<double> ftxs;
+			txs.resize(PopSize);
+
+			RandomPermutation perm(PopSize);
+			for(int i=0;i<PopSize;i++){
+				perm.generate();
+				int a=bestI; int b=perm.next(); int c=perm.next();
+				int randDim=rand()%numDim;
+				for(int j=0;j<numDim;j++){
+					if(j==randDim||drand()<=CR){
+						tx[j]=x[a][j]+F*(x[b][j]-x[c][j]);
+						if(tx[j]<range[j][0] || tx[j]>range[j][1]){
+							tx[j]=drand(range[j][0],range[j][1]);
+						}
+					}else{
+						tx[j]=x[i][j];
+					}
+				}
+				txs[i]=tx;
+			}
+			evaluatePopulation(txs,ftxs);
+			for(int i=0;i<PopSize;i++){
+				vector<double>&tx=txs[i];
+				double &ftx=ftxs[i];
+				if(ftx<fx[i]){
+					x[i]=tx;
+					fx[i]=ftx;
+					if(ftx<fx[bestI]){
+						bestI=i;
+					}
+				}
+			}
+		}
+	private:
+		double getBestFx()const{
+			return fx[bestI];
+		}
+		void update(int maxGeneration){
+#define SaveData if(save!=NULL){save->add(getBestFx());}
+			SaveData;
+			cout<<"0:"<<getBestFx()<<endl;
+			for(int g=1;g<=maxGeneration;g++){
+				//	if(maxGeneration<30||g%(maxGeneration/30)==0){
+				//	cout<<g/(maxGeneration/30)<<":F(g="<<g<<")="<<getBestFx()<<endl;
+				//}
+				cout<<g<<":"<<getBestFx()<<endl;
+				updateX();
+				SaveData;
+			}
+		}
+	public:
+		ParallelDE(){}
+		ParallelDE(MPIHelper *h):mpi(h),save(0){
+		}
+		ParallelDE(MPIHelper *h,SearchParam*p):mpi(h),param(p){
+			initParam(param);
+		}
+		~ParallelDE(){
+			//	endEvaluate();
+		}
+		void setParam(MPIHelper *h,SearchParam*p){
+			mpi=h;
+			param=p;
+			initParam(param);
+		}
+		void addSave(Save *s){
+			save=s;
+		}
+		void initParam(SearchParam *param){
+			this->param=param;
+			//
+			PopSize=param->getInt("PopSize");
+			F=param->getDouble("F");
+			CR=param->getDouble("CR");
+			param->getBiVector("Range",range);
+#ifdef DEBUG
+			cout<<"Range:";
+			for(int i=0;i<range.size();i++){
+				printf("[%g,%g],",range[i][0],range[i][1]);
+			}
+			cout<<endl;
+#endif
+			setName(param->getString("Name"));
+		}
+
+		void calulateBestI(){
+			bestI=0;
+			for(int i=0;i<PopSize;i++){
+				if(fx[i]<fx[bestI]){ 
+					bestI=i;
+				}
+			}
+		}
+#define MESS_END 0
+#define MESS_EVAL_ARRAY 2
+
+		void generateSplitTask(int numTask,int numProcesses,vector<int>&task){
+			//uniformly distribute the tasks among all processes.
+			task.resize(numProcesses+1);
+			int numXPerProcesses=numTask/numProcesses;
+			int numRemain=numTask-numXPerProcesses*numProcesses;
+			task[0]=0;
+			int i;
+			for(i=0;i<numRemain;i++){
+				task[i+1]=task[i]+numXPerProcesses+1;
+			}
+			for(;i<numProcesses;i++){
+				task[i+1]=task[i]+numXPerProcesses;
+			}
+		}
+		void evaluatePopulation(vector<vector<double> >&xs,vector<double>&fx){
+			vector<Task>tasks;
+			tasks.resize(xs.size());
+			for(int i=0;i<xs.size();i++){
+				tasks[i].init(xs[i]);
+				assert(tasks[0].id+i==tasks[i].id);
+			}
+			scheduler.addTask(tasks);
+			scheduler.start();
+			fx.resize(xs.size());
+			for(int i=0;i<xs.size();i++){
+				fx[i]=tasks[i].getFx();
+			}
+		}
+		void endEvaluate(){
+			scheduler.end();
+		}
+		virtual double getMin(Function *f,int MaxFEs,vector<double>&out_x,double &out_fx){
+			if(save!=0){
+				save->setXY("Generation",f->getName());
+			}
+			if(mpi->getNumProcesses()<=1){
+				BasicDE de;
+				de.initParam(param);
+				cout<<"Warning:NumProcesses<=1, Use BasicDE()"<<endl;
+				return de.getMin(f,MaxFEs,out_x,out_fx);
+			}
+			//allocating space.
+			this->f=f;
+			numDim=f->getNumDim();
+			tx.resize(numDim);
+			x.resize(PopSize);
+			fx.resize(PopSize);
+			for(int i=0;i<PopSize;i++){
+				x[i].resize(numDim);
+			}
+			scheduler.init(mpi,f,numDim);
+			//
+			if(mpi->isMaster()){
+				ASSERT(range.size()>=f->getNumDim());
+				ASSERT(range[0].size()>=2);
+				//population initializing....
+				for(int i=0;i<PopSize;i++){
+					for(int d=0;d<numDim;d++){
+						x[i][d]=drand(range[d][0],range[d][1]);
+					} 
+				}
+				evaluatePopulation(x,fx);
+
+				calulateBestI();
+				cout<<"*******************Start update per generation"<<endl;
+				//update, main process.
+				update(MaxFEs/PopSize-1);
+				cout<<"*******************end Start update per generation"<<endl;
+				endEvaluate();//stop evaluating....
+				calulateBestI();
+				out_x=x[bestI];
+				out_fx=fx[bestI];
+				return out_fx;
+			}else{//slavery processes,only evaluate the f(x).
+				scheduler.start();
+				scheduler.end();
+				return -1;
+			}
+		}
+};
+///////////////////////
+void saveConfigData(int id,const char *f,const char *algorithm,const char *param,int run,int MaxRun,int numOfProcesses,int MaxFEs,int PopSize,int NumDim,double F,double CR,const char *state,double usedTime,double absError,
+		vector<double>&x,double fx){
+	ofstream runConfig;
+	char buff[1000];
+	sprintf(buff,"Run-configuration-%d.txt",id);
+	if(strcmp(state,"start")==0){
+		cout<<"Save file:"<<buff<<endl;
+	}
+	runConfig.open(buff,ofstream::app|ofstream::out);
+	runConfig<<"ID\tFunction\tAlgorithm\tParamemterFile\tRun\tMaxRun\tNumOfProcesses\tMaxFEs\tPopSize\tNumDim\tF-parameter\tCR-paramter\tState\tUsedTime\tAbsError\tX\tFx"<<endl;
+	sprintf(buff,"%d\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%g\t%g\t%s\t%g\t%g",id,f,algorithm,param,run,MaxRun,numOfProcesses,MaxFEs,
+			PopSize,NumDim,F,CR,state,usedTime,absError);
+	runConfig<<buff<<"\t";
+	if(x.size()==0){
+		runConfig<<"-1";
+	}else{
+		for(int i=0;i<x.size();i++){
+			sprintf(buff,"%g",x[i]);
+			if(i!=0){
+				runConfig<<",";
+			}
+			runConfig<<buff;
+		} 
+		sprintf(buff,"\t%g",fx);
+		runConfig<<buff;
+
+		runConfig<<endl;
+		runConfig.flush();
+		runConfig.close();
+	}
+}
+
+ParallelDE *de=0;
+void IntHandler(int s){
+	if(de!=NULL){
+		delete de;
+		de=NULL;
+	}
+	cout<<"My:Caught signal SIGINT"<<endl;
+	exit(1);
+}
+int MainProgram(MPIHelper*mpi,int run,int MaxRun,int configID,ParallelDE*de,Function*f,SearchParam*param,bool isFindMin=true){
+	/*************Shared Data*************/
+	vector<double>x;
+	double fx=-1;
+	srand(time(NULL));
+	Save save;
+	/**************end Shared Data***********/
+
+	/********Master data*************/
+	char state[50]="start";
+	double usedTime;
+	double absError;
+	/**********end Master data*************/
+
+	//
+	//
+	printf("client(%s) starts computing...\n",mpi->getName());
+	if(mpi->isMaster()){
+		printf("Runing %s \n",de->getName());
+		cout<<"FunName(MyBestF,Optima)"<<endl;
+		//
+		usedTime=-1;
+		absError=-1;
+		//
+		char saveFileName[100];
+		sprintf(saveFileName,"Data-%d.txt",configID);
+		save.init(saveFileName);
+		de->addSave(&save);
+		saveConfigData(configID,f->getName(),de->getName(),param->getName(),run,MaxRun,mpi->getNumProcesses(),param->getInt("MaxFEs"),
+				param->getInt("PopSize"),param->getInt("NumDim"),param->getDouble("F"),param->getDouble("CR"),state,usedTime,absError,x,fx);
+		Tic::tic("begin");
+	}
+	if(isFindMin){
+		de->getMin(f,param->getInt("MaxFEs"),x,fx);
+	}else{
+		de->getMax(f,param->getInt("MaxFEs"),x,fx);
+	}
+	if(mpi->isMaster()){
+		usedTime=Tic::tic("end");
+		absError=fabs(fx-f->getFBest());
+		strcpy(state,"end");
+
+		saveConfigData(configID,f->getName(),de->getName(),param->getName(),run,MaxRun,mpi->getNumProcesses(),param->getInt("MaxFEs"),
+				param->getInt("PopSize"),param->getInt("NumDim"),param->getDouble("F"),param->getDouble("CR"),state,usedTime,absError,x,fx);
+
+		printf("%s(%g,%g)\n",f->getName(),fx,f->getFBest());
+		cout<<"ends successfully!"<<endl;
+	}
+	return 0;
+}
+//#define TEST
+
+#include<pthread.h>
+void * fun(void *m){
+	const char *a=(const char*)m;
+	printf("%s\n",a);
+}
+
+#ifdef TEST
+int main(int argc,char *argv[]){
+#else
+	int old_main(int argc,char *argv[]){
+#endif
+		/*
+		   MPIHelper mpi(argc,argv);
+		   Trace(mpi.getName());
+		   if(mpi.isMaster()){
+		   for(int i=1;i<mpi.getNumProcesses();i++){
+		   mpi.send(i,i);
+		   }
+		   }else{
+		   int k=-1;
+		   mpi.recv(k,0);
+		   cout<<mpi.getName()<<" recv k:"<<k<<endl;
+		//Trace(k)
+		}
+		 */
+		pthread_t t1,t2;
+		const char *m1="t1";
+		const char *m2="t2";
+		int res=pthread_create(&t1,NULL,fun,(void*)m1);
+		res=pthread_create(&t2,NULL,fun,(void*)m2);
+		cout<<"main"<<endl;
+		if(res){
+			cout<<"Error: res:"<<res<<endl;
+			exit(1);
+		}
+		pthread_join(t1,NULL);
+		pthread_join(t2,NULL);
+	}
+
+#ifdef TEST
+	int old_main(int argc,char *argv[]){
+#else
+		int main(int argc,char *argv[]){
+#endif
+			SignalHandleHelper::registerSignalHandler(IntHandler);
+			MPIHelper mpi(argc,argv);
+			int configID;//Should be run once, in master node.
+			de=new ParallelDE();
+			//	Function*f=new F1();
+		//	SearchParam param("TestF.json");
+			/*
+			*/
+			Function*f=new PECFunction();
+			SearchParam param("PEC.json");
+			/*
+			Function*f=new TestF();
+			*/
+			//
+			f->setNumDim(param.getInt("NumDim"));
+			de->setParam(&mpi,&param);
+			const int MaxRun=param.getInt("MaxRun");
+			int run=0;
+			bool isFindMin=false;
+			for(run=1;run<=MaxRun;run++){
+				if(mpi.isMaster()){
+					configID=IDHelper::newID();//Should be run once, in master node.
+				}else{
+					configID=-1;//unused in slavery process.
+				}
+				MainProgram(&mpi,run,MaxRun,configID,de,f,&param,isFindMin);
+			}
+			delete de;
+			delete f;
+			//	cout<<"end of program."<<endl;
+			return 0;
+		}
